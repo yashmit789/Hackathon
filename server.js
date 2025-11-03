@@ -6,7 +6,7 @@ const cors = require('cors');
 const multer = require('multer');
 const { v2: cloudinary } = require('cloudinary');
 const { Readable } = require('stream');
-const fetch = require('node-fetch-cjs'); // Use node-fetch-cjs for CommonJS compatibility
+const fetch = require('node-fetch'); // Use node-fetch v2 for CommonJS compatibility
 require('dotenv').config(); // For environment variables
 
 // --- App & Middleware Setup ---
@@ -359,4 +359,5 @@ app.listen(port, async () => {
     await initDatabase();
     console.log(`CleanSweep server listening on port ${port}`);
 });
+
 
