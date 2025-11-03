@@ -1,17 +1,17 @@
 // CleanSweep Backend (server.js)
 // --- Dependencies ---
 const express = require('express');
-const { Pool } = require('pg'); // Use pg for PostgreSQL
+const { Pool } = require('pg'); // Use 'pg' for PostgreSQL
 const cors = require('cors');
 const multer = require('multer');
 const { v2: cloudinary } = require('cloudinary');
 const { Readable } = require('stream');
-const fetch = require('node-fetch'); // Use node-fetch v2 for CommonJS compatibility
+const fetch = require('node-fetch'); // Use 'node-fetch' v2
 require('dotenv').config(); // For environment variables
 
 // --- App & Middleware Setup ---
 const app = express();
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 10000; // Render uses 10000
 
 app.use(cors()); // Allow cross-origin requests
 app.use(express.json()); // Parse JSON bodies
@@ -46,19 +46,19 @@ const uploadToCloudinary = (buffer) => {
 };
 
 // --- PostgreSQL Database Connection ---
-let dbPool;
+// Render provides the connection string in the DATABASE_URL env var
+const dbPool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: {
+        rejectUnauthorized: false // Required for Render's managed SSL
+    }
+});
+
 async function initDatabase() {
     try {
-        // Render provides a DATABASE_URL environment variable, which the Pool uses automatically.
-        dbPool = new Pool({
-            connectionString: process.env.DATABASE_URL,
-            ssl: {
-                rejectUnauthorized: false // Required for Render connections
-            }
-        });
-        // Test connection
-        await dbPool.query('SELECT 1');
+        const client = await dbPool.connect();
         console.log('PostgreSQL Database connected successfully.');
+        client.release();
     } catch (error) {
         console.error('Failed to connect to PostgreSQL database:', error);
         process.exit(1); // Exit if DB connection fails
@@ -157,20 +157,21 @@ app.post('/api/report', upload.single('photo'), async (req, res) => {
             return res.status(400).json({ error: 'Missing required fields.' });
         }
 
-        // --- 1. Clustering Logic ---
-        // Haversine formula in SQL to find nearby pending reports (within 50 meters)
-        // Placeholders changed from ? to $1, $2, etc. for PostgreSQL
+        // --- 1. Clustering Logic (FIXED FOR POSTGRESQL) ---
+        // We must use a subquery for PostgreSQL to recognize the 'distance' alias
         const { rows: existing } = await dbPool.query(
-            `SELECT id, (
-                6371 * acos(
-                    cos(radians($1)) * cos(radians(lat)) *
-                    cos(radians(lng) - radians($2)) +
-                    sin(radians($3)) * sin(radians(lat))
-                )
-            ) AS distance
-            FROM reports
-            WHERE status = 'pending'
-            HAVING distance < 0.05
+            `SELECT * FROM (
+                SELECT id, (
+                    6371 * acos(
+                        cos(radians($1)) * cos(radians(lat)) *
+                        cos(radians(lng) - radians($2)) +
+                        sin(radians($3)) * sin(radians(lat))
+                    )
+                ) AS distance
+                FROM reports
+                WHERE status = 'pending'
+            ) AS subquery
+            WHERE distance < 0.05
             ORDER BY distance
             LIMIT 1`,
             [lat, lng, lat]
@@ -196,17 +197,14 @@ app.post('/api/report', upload.single('photo'), async (req, res) => {
         const { category, severity } = await getAITriage(photoBuffer, mimeType, geminiKey);
         
         // Save to database
-        // Added "RETURNING *" to get the new row back (PostgreSQL specific)
-        const { rows } = await dbPool.query(
+        const { rows: newReport } = await dbPool.query(
             `INSERT INTO reports (citizen_device_id, lat, lng, initial_photo_url, description, category, severity)
              VALUES ($1, $2, $3, $4, $5, $6, $7)
-             RETURNING *`,
+             RETURNING *`, // Get the new report back
             [citizen_device_id, lat, lng, initial_photo_url, description, category, severity]
         );
         
-        const newReport = rows[0];
-        
-        res.status(201).json(newReport);
+        res.status(201).json(newReport[0]);
 
     } catch (error) {
         console.error('POST /api/report Error:', error);
@@ -259,7 +257,8 @@ app.put('/api/report/:id/status', async (req, res) => {
             return res.status(400).json({ error: 'Invalid status.' });
         }
         
-        await dbPool.query('UPDATE reports SET status = $1 WHERE id = $2', [status, id]);
+        // We need to cast the status to the 'report_status' enum type
+        await dbPool.query('UPDATE reports SET status = $1::report_status WHERE id = $2', [status, id]);
         res.json({ success: true, message: 'Status updated.' });
 
     } catch (error) {
@@ -286,7 +285,7 @@ app.put('/api/report/:id/cleanup', upload.single('photo'), async (req, res) => {
 
         // Update database
         await dbPool.query(
-            'UPDATE reports SET status = $1, cleanup_photo_url = $2, cleaned_at = NOW() WHERE id = $3',
+            'UPDATE reports SET status = $1::report_status, cleanup_photo_url = $2, cleaned_at = NOW() WHERE id = $3',
             ['cleaned', cleanup_photo_url, id]
         );
         
@@ -305,18 +304,17 @@ app.put('/api/report/:id/cleanup', upload.single('photo'), async (req, res) => {
 app.get('/api/stats', async (req, res) => {
     try {
         // 1. KPIs
-        // Changed TIMESTAMPDIFF to PostgreSQL's EXTRACT(EPOCH FROM ...) / 3600
         const { rows: kpiRows } = await dbPool.query(
             `SELECT
                 COUNT(*) as total,
                 SUM(CASE WHEN status = 'cleaned' THEN 1 ELSE 0 END) as cleaned,
-                AVG(CASE WHEN status = 'cleaned' THEN EXTRACT(EPOCH FROM (cleaned_at - created_at)) / 3600 ELSE NULL END) as avg_cleanup_time_hours
+                -- Use EXTRACT(EPOCH FROM ...) to get total seconds, then convert to hours
+                AVG(CASE WHEN status = 'cleaned' THEN EXTRACT(EPOCH FROM (cleaned_at - created_at))/3600 ELSE NULL END) as avg_cleanup_time_hours
             FROM reports`
         );
         const kpis = kpiRows[0];
         
         // 2. Reports over Time (last 30 days)
-        // Changed CURDATE() and INTERVAL syntax for PostgreSQL
         const { rows: overTimeRows } = await dbPool.query(
             `SELECT DATE(created_at) as date, COUNT(*) as count
              FROM reports
@@ -339,7 +337,8 @@ app.get('/api/stats', async (req, res) => {
 
         res.json({
             kpis: {
-                ...kpis,
+                total: kpis.total || 0,
+                cleaned: kpis.cleaned || 0,
                 avg_cleanup_time_hours: kpis.avg_cleanup_time_hours ? parseFloat(kpis.avg_cleanup_time_hours).toFixed(1) : 0
             },
             overTime: overTimeRows,
@@ -359,5 +358,3 @@ app.listen(port, async () => {
     await initDatabase();
     console.log(`CleanSweep server listening on port ${port}`);
 });
-
-
