@@ -3,3 +3,4 @@ cloud name = debdhmfx7
 cloudinary api key = 867828849179897
 gemini api = AIzaSyDWINJ1OtlnTRrOxiDVUwO-_McYOSq6x2A
 external connection string = postgresql://cleansweep_db_user:56fHJhJ18vlS0a4KXkPOBgddUBTyKGXZ@dpg-d447931r0fns73fsdvkg-a.oregon-postgres.render.com/cleansweep_db
+txt= https://hackathon-s0ij.onrender.com

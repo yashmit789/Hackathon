@@ -1,0 +1,1100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CleanSweep</title>
+    <!-- 1. Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 2. Leaflet.js (for Maps) -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <!-- 3. Chart.js (for Stats) -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- 4. Leaflet.heat (for Heatmap) -->
+    <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+    <!-- 5. Font Awesome (for Icons) -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" />
+
+    <style>
+        /* Custom dark mode theme */
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .dark-mode {
+            background-color: #111827; /* gray-900 */
+            color: #f3f4f6; /* gray-100 */
+        }
+        .nav-button {
+            @apply flex-1 text-center py-4 px-2 text-gray-400 border-b-2 border-transparent;
+        }
+        .nav-button.active {
+            @apply text-indigo-400 border-indigo-400;
+        }
+        .leaflet-tile-pane {
+            filter: brightness(0.8) contrast(1.1) grayscale(0.1);
+        }
+        .btn-primary {
+            @apply w-full bg-indigo-600 text-white font-bold py-3 px-4 rounded-lg shadow-md hover:bg-indigo-700 transition-all duration-300;
+        }
+        .btn-secondary {
+            @apply w-full bg-gray-600 text-white font-bold py-3 px-4 rounded-lg shadow-md hover:bg-gray-700 transition-all duration-300;
+        }
+        .input-field {
+            @apply w-full px-4 py-3 rounded-lg bg-gray-700 border border-gray-600 text-gray-100 focus:outline-none focus:ring-2 focus:ring-indigo-400;
+        }
+        .card {
+            @apply bg-gray-800 shadow-lg rounded-xl overflow-hidden;
+        }
+        /* Custom spinner */
+        .spinner {
+            border: 4px solid rgba(255, 255, 255, 0.3);
+            border-top: 4px solid #818cf8; /* indigo-300 */
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+
+<body class="dark-mode">
+
+    <!-- Main Application Container -->
+    <div id="app" class="max-w-xl mx-auto min-h-screen flex flex-col">
+        
+        <!-- Header -->
+        <header class="text-center py-6">
+            <h1 class="text-3xl font-bold text-white">
+                <i class="fa-solid fa-recycle text-indigo-400"></i> CleanSweep
+            </h1>
+            <p class="text-sm text-gray-400">Smart Waste Reporting for Cleaner Communities</p>
+        </header>
+
+        <!-- Main Content (Pages) -->
+        <main class="flex-grow p-4">
+            
+            <!-- Page 1: Report -->
+            <div id="page-report" class="space-y-6">
+                <div class="space-y-4">
+                    <button id="btn-get-location" class="btn-primary">
+                        <i class="fa-solid fa-location-crosshairs"></i>
+                        <span id="location-text">Get My Location</span>
+                    </button>
+                    <input type="hidden" id="report-lat">
+                    <input type="hidden" id="report-lng">
+
+                    <div id="location-status" class="text-center text-sm text-gray-400 hidden"></div>
+                </div>
+                
+                <div class="space-y-4">
+                    <label for="report-photo" class="block text-sm font-medium text-gray-300">Upload Photo</label>
+                    <input type="file" id="report-photo" accept="image/*" class="w-full text-sm text-gray-400
+                        file:mr-4 file:py-2 file:px-4
+                        file:rounded-lg file:border-0
+                        file:text-sm file:font-semibold
+                        file:bg-indigo-600 file:text-white
+                        hover:file:bg-indigo-700 cursor-pointer"/>
+                    <img id="photo-preview" class="hidden rounded-lg w-full h-auto" alt="Photo Preview" />
+                </div>
+                
+                <div class="space-y-4">
+                    <label for="report-description" class="block text-sm font-medium text-gray-300">Description (Optional)</label>
+                    <textarea id="report-description" rows="3" class="input-field" placeholder="e.g., Construction debris, old mattress..."></textarea>
+                </div>
+                
+                <button id="btn-submit-report" class="btn-primary" disabled>
+                    Submit Report
+                </button>
+            </div>
+
+            <!-- Page 2: My Reports (Feedback Loop) -->
+            <div id="page-my-reports" class="hidden space-y-4">
+                <h2 class="text-2xl font-bold text-white">My Reports</h2>
+                <div id="my-reports-list" class="space-y-4">
+                    <!-- Reports will be injected here -->
+                    <div id="my-reports-loading" class="text-center text-gray-400">
+                        <div class="spinner mx-auto my-4"></div>
+                        Loading my reports...
+                    </div>
+                    <p id="no-my-reports" class="hidden text-center text-gray-500">You haven't submitted any reports yet.</p>
+                </div>
+            </div>
+
+            <!-- Page 3: Admin Dashboard -->
+            <div id="page-admin" class="hidden space-y-4">
+                <div class="flex justify-between items-center">
+                    <h2 class="text-2xl font-bold text-white">Admin Dashboard</h2>
+                    <button id="admin-refresh" class="text-indigo-400 hover:text-indigo-300">
+                        <i class="fa-solid fa-sync"></i> Refresh
+                    </button>
+                </div>
+                
+                <div class="flex space-x-2">
+                    <select id="filter-status" class="input-field flex-1">
+                        <option value="all">All Statuses</option>
+                        <option value="pending">Pending</option>
+                        <option value="in_progress">In Progress</option>
+                        <option value="cleaned">Cleaned</option>
+                    </select>
+                    <select id="filter-severity" class="input-field flex-1">
+                        <option value="all">All Severities</option>
+                        <option value="Small">Small</option>
+                        <option value="Medium">Medium</option>
+                        <option value="Large">Large</option>
+                    </select>
+                </div>
+
+                <div id="admin-map" class="w-full h-64 rounded-lg bg-gray-700"></div>
+                
+                <div id="admin-list" class="space-y-4">
+                    <!-- Admin list will be injected here -->
+                    <div id="admin-loading" class="text-center text-gray-400">
+                        <div class="spinner mx-auto my-4"></div>
+                        Loading all reports...
+                    </div>
+                </div>
+            </div>
+
+            <!-- Page 4: Stats (Analytics) -->
+            <div id="page-stats" class="hidden space-y-6">
+                <div class="flex justify-between items-center">
+                    <h2 class="text-2xl font-bold text-white">Platform Analytics</h2>
+                    <button id="stats-refresh" class="text-indigo-400 hover:text-indigo-300">
+                        <i class="fa-solid fa-sync"></i> Refresh
+                    </button>
+                </div>
+
+                <div id="stats-loading" class="text-center text-gray-400">
+                    <div class="spinner mx-auto my-4"></div>
+                    Loading analytics...
+                </div>
+                
+                <div id="stats-content" class="hidden space-y-6">
+                    <!-- KPIs -->
+                    <div class="grid grid-cols-2 gap-4">
+                        <div class="card p-4 text-center">
+                            <div id="kpi-total" class="text-3xl font-bold text-indigo-400">...</div>
+                            <div class="text-sm text-gray-400">Total Reports</div>
+                        </div>
+                        <div class="card p-4 text-center">
+                            <div id="kpi-cleaned" class="text-3xl font-bold text-green-400">...</div>
+                            <div class="text-sm text-gray-400">Reports Cleaned</div>
+                        </div>
+                        <div class="card p-4 col-span-2 text-center">
+                            <div id="kpi-avg-time" class="text-3xl font-bold text-yellow-400">...</div>
+                            <div class="text-sm text-gray-400">Avg. Cleanup Time (Hours)</div>
+                        </div>
+                    </div>
+                    
+                    <!-- Reports Over Time -->
+                    <div class="card p-4">
+                        <h3 class="font-semibold text-white mb-2">Reports Over Time (30 Days)</h3>
+                        <canvas id="reports-over-time-chart"></canvas>
+                    </div>
+
+                    <!-- Reports by Category -->
+                    <div class="card p-4">
+                        <h3 class="font-semibold text-white mb-2">Reports by Category</h3>
+                        <canvas id="category-chart"></canvas>
+                    </div>
+
+                    <!-- Heatmap -->
+                    <div class="card p-4">
+                        <h3 class="font-semibold text-white mb-2">Dumping Hotspots</h3>
+                        <div id="heatmap-map" class="w-full h-64 rounded-lg bg-gray-700"></div>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Navigation Bar -->
+        <nav class="sticky bottom-0 left-0 w-full bg-gray-800 shadow-t grid grid-cols-4">
+            <button id="nav-report" class="nav-button active" data-page="report">
+                <i class="fa-solid fa-bullhorn"></i>
+                <span class="block text-xs">Report</span>
+            </button>
+            <button id="nav-my-reports" class="nav-button" data-page="my-reports">
+                <i class="fa-solid fa-list-check"></i>
+                <span class="block text-xs">My Reports</span>
+            </button>
+            <button id="nav-admin" class="nav-button" data-page="admin">
+                <i class="fa-solid fa-map-location-dot"></i>
+                <span class="block text-xs">Admin</span>
+            </button>
+            <button id="nav-stats" class="nav-button" data-page="stats">
+                <i class="fa-solid fa-chart-line"></i>
+                <span class="block text-xs">Stats</span>
+            </button>
+        </nav>
+    </div>
+
+    <!-- Modals -->
+
+    <!-- 1. Settings Modal (Now hidden by default and no longer used) -->
+    <div id="settings-modal" class="hidden fixed inset-0 bg-black bg-opacity-75 items-center justify-center p-4 z-50">
+        <div class="bg-gray-800 p-6 rounded-lg shadow-xl w-full max-w-sm">
+            <h2 class="text-xl font-bold text-white mb-4">Configuration Required</h2>
+            <p class="text-gray-300 text-sm mb-4">Please set your API endpoints to use the app. You only need to do this once.</p>
+            <div class="space-y-4">
+                <div>
+                    <label for="api-url" class="block text-sm font-medium text-gray-300">Backend API URL</label>
+                    <input type="text" id="api-url" class="input-field mt-1" placeholder="https://your-backend.onrender.com">
+                </div>
+                <div>
+                    <label for="gemini-key" class="block text-sm font-medium text-gray-300">Gemini API Key</label>
+                    <input type="password" id="gemini-key" class="input-field mt-1" placeholder="Enter your Google AI key...">
+                </div>
+                <button id="btn-save-settings" class="btn-primary">Save Settings</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 2. Admin Detail Modal -->
+    <div id="admin-detail-modal" class="hidden fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center p-4 z-40">
+        <div class="bg-gray-800 p-4 rounded-lg shadow-xl w-full max-w-sm max-h-screen overflow-y-auto">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-xl font-bold text-white">Report Details</h2>
+                <button id="admin-modal-close" class="text-gray-400 hover:text-white">&times;</button>
+            </div>
+            <div id="admin-modal-content" class="space-y-4">
+                <!-- Content injected by JS -->
+            </div>
+        </div>
+    </div>
+
+    <!-- 3. Global Loading Modal -->
+    <div id="loading-modal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+        <div class="bg-gray-800 p-6 rounded-lg shadow-xl flex items-center space-x-4">
+            <div class="spinner"></div>
+            <span id="loading-text" class="text-white">Loading...</span>
+        </div>
+    </div>
+
+    <!-- JavaScript -->
+    <script>
+        // --- CONFIG & STATE ---
+        const state = {
+            currentPage: 'report',
+            config: {
+                apiUrl: null,
+                geminiKey: null,
+                citizenDeviceId: null,
+            },
+            maps: {
+                adminMap: null,
+                heatmap: null,
+            },
+            charts: {
+                reportsOverTime: null,
+                category: null,
+            },
+            currentReports: [], // Cache for admin dashboard
+            currentLocation: null, // { lat, lng }
+        };
+
+        // --- GLOBAL HELPER FUNCTIONS ---
+        
+        function showLoading(message) {
+            document.getElementById('loading-text').textContent = message || 'Loading...';
+            document.getElementById('loading-modal').classList.remove('hidden');
+        }
+
+        function hideLoading() {
+            document.getElementById('loading-modal').classList.add('hidden');
+        }
+        
+        function showMessage(type, text) {
+            // A simple, non-blocking message
+            const msgId = 'global-message';
+            let msgEl = document.getElementById(msgId);
+            if (!msgEl) {
+                msgEl = document.createElement('div');
+                msgEl.id = msgId;
+                msgEl.className = 'fixed top-5 left-1/2 -translate-x-1/2 p-4 rounded-lg shadow-lg z-50 text-white font-semibold';
+                document.body.appendChild(msgEl);
+            }
+            
+            msgEl.textContent = text;
+            msgEl.className = msgEl.className.replace(/(bg-red-500|bg-green-500|bg-yellow-500)/g, '');
+            
+            if (type === 'success') {
+                msgEl.classList.add('bg-green-500');
+            } else if (type === 'error') {
+                msgEl.classList.add('bg-red-500');
+            } else {
+                msgEl.classList.add('bg-yellow-500');
+            }
+
+            msgEl.style.display = 'block';
+            setTimeout(() => {
+                msgEl.style.display = 'none';
+            }, 3000);
+        }
+
+        // --- API HELPER ---
+        /**
+         * A wrapper for the fetch API to add the API URL
+         * @param {string} endpoint - e.g., '/api/reports'
+         * @param {object} options - Fetch options (method, body, etc.)
+         * @returns {Promise<Response>}
+         */
+        async function api(endpoint, options = {}) {
+            const url = `${state.config.apiUrl}${endpoint}`;
+            
+            // Add Gemini key to headers if it's not a GET request
+            if (state.config.geminiKey && options.method && options.method !== 'GET') {
+                options.headers = options.headers || {};
+                options.headers['X-Gemini-Key'] = state.config.geminiKey;
+            }
+
+            return fetch(url, options);
+        }
+
+        // --- INITIALIZATION ---
+        
+        document.addEventListener('DOMContentLoaded', () => {
+            console.log('App Loaded. Initializing...');
+            loadConfig();
+            initNavigation();
+            initReportPage();
+            initAdminPage();
+            initStatsPage();
+            initMyReportsPage();
+
+            // Modal is no longer needed, hide it and navigate to report page
+            document.getElementById('settings-modal').classList.add('hidden');
+            navigateTo('report'); // Start on report page
+        });
+
+        function loadConfig() {
+            // Hardcode the API URL and Gemini Key
+            state.config.apiUrl = 'https://hackathon-s0ij.onrender.com';
+            state.config.geminiKey = 'AIzaSyDWINJ1OtlnTRrOxiDVUwO-_McYOSq6x2A';
+            
+            let deviceId = localStorage.getItem('cleanSweepDeviceId');
+            if (!deviceId) {
+                deviceId = crypto.randomUUID();
+                localStorage.setItem('cleanSweepDeviceId', deviceId);
+            }
+            state.config.citizenDeviceId = deviceId;
+            console.log('Config loaded. Device ID:', deviceId);
+            console.log('API URL and Key are hardcoded.');
+
+            // document.getElementById('btn-save-settings').onclick = saveConfig; // No longer needed
+            
+            // Pre-fill modal if values exist
+            // if(state.config.apiUrl) document.getElementById('api-url').value = state.config.apiUrl; // No longer needed
+            // if(state.config.geminiKey) document.getElementById('gemini-key').value = state.config.geminiKey; // No longer needed
+        }
+
+        /*
+        // saveConfig function is no longer needed as keys are hardcoded
+        function saveConfig() {
+            const apiUrl = document.getElementById('api-url').value;
+            const geminiKey = document.getElementById('gemini-key').value;
+
+            if (!apiUrl || !geminiKey) {
+                showMessage('error', 'Please fill in all fields.');
+                return;
+            }
+            
+            // Basic URL validation
+            try {
+                new URL(apiUrl);
+            } catch(e) {
+                showMessage('error', 'Invalid API URL format.');
+                return;
+            }
+
+            localStorage.setItem('cleanSweepApiUrl', apiUrl);
+            localStorage.setItem('cleanSweepGeminiKey', geminiKey);
+            state.config.apiUrl = apiUrl;
+            state.config.geminiKey = geminiKey;
+            
+            document.getElementById('settings-modal').classList.add('hidden');
+            showMessage('success', 'Settings saved!');
+            navigateTo('report');
+        }
+        */
+        
+        // --- NAVIGATION ---
+        
+        function initNavigation() {
+            document.querySelectorAll('.nav-button').forEach(button => {
+                button.addEventListener('click', () => {
+                    const pageId = button.dataset.page;
+                    navigateTo(pageId);
+                });
+            });
+        }
+        
+        function navigateTo(pageId) {
+            // Hide all pages
+            document.querySelectorAll('main > div').forEach(page => {
+                page.classList.add('hidden');
+            });
+            
+            // Deactivate all nav buttons
+            document.querySelectorAll('.nav-button').forEach(button => {
+                button.classList.remove('active');
+            });
+
+            // Show target page
+            const targetPage = document.getElementById(`page-${pageId}`);
+            if (targetPage) {
+                targetPage.classList.remove('hidden');
+            }
+
+            // Activate target button
+            const targetButton = document.getElementById(`nav-${pageId}`);
+            if (targetButton) {
+                targetButton.classList.add('active');
+            }
+            
+            state.currentPage = pageId;
+            console.log('Navigated to:', pageId);
+
+            // Trigger load functions for dynamic pages
+            if (pageId === 'admin') {
+                loadAllReports();
+            } else if (pageId === 'my-reports') {
+                loadMyReports();
+            } else if (pageId === 'stats') {
+                loadStats();
+            }
+        }
+
+        // --- PAGE 1: REPORT ---
+        
+        function initReportPage() {
+            const photoInput = document.getElementById('report-photo');
+            const preview = document.getElementById('photo-preview');
+            const locationBtn = document.getElementById('btn-get-location');
+            const submitBtn = document.getElementById('btn-submit-report');
+            
+            locationBtn.onclick = handleGetLocation;
+            submitBtn.onclick = handleSubmitReport;
+            
+            photoInput.onchange = (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        preview.src = e.target.result;
+                        preview.classList.remove('hidden');
+                        checkFormValidity();
+                    };
+                    reader.readAsDataURL(file);
+                }
+            };
+        }
+
+        function handleGetLocation() {
+            const locationStatus = document.getElementById('location-status');
+            const locationText = document.getElementById('location-text');
+            
+            locationStatus.classList.remove('hidden');
+            locationStatus.textContent = 'Getting location...';
+            locationText.parentElement.disabled = true;
+
+            if (!navigator.geolocation) {
+                locationStatus.textContent = 'Geolocation is not supported by your browser.';
+                locationText.parentElement.disabled = false;
+                return;
+            }
+
+            navigator.geolocation.getCurrentPosition(
+                (position) => {
+                    state.currentLocation = {
+                        lat: position.coords.latitude,
+                        lng: position.coords.longitude
+                    };
+                    document.getElementById('report-lat').value = state.currentLocation.lat;
+                    document.getElementById('report-lng').value = state.currentLocation.lng;
+                    
+                    locationStatus.textContent = `Location found! (${state.currentLocation.lat.toFixed(4)}, ${state.currentLocation.lng.toFixed(4)})`;
+                    locationText.textContent = 'Location Acquired';
+                    locationText.parentElement.classList.replace('btn-primary', 'btn-secondary');
+                    checkFormValidity();
+                },
+                (error) => {
+                    // This error will trigger in sandboxed iframes (like the preview)
+                    console.warn('Geolocation failed:', error.message);
+                    
+                    // DEMO FALLBACK
+                    state.currentLocation = { lat: 28.6139, lng: 77.2090 }; // New Delhi
+                    document.getElementById('report-lat').value = state.currentLocation.lat;
+                    document.getElementById('report-lng').value = state.currentLocation.lng;
+                    
+                    locationStatus.textContent = 'Using default location for demo.';
+                    locationText.textContent = 'Location (Default)';
+                    locationText.parentElement.classList.replace('btn-primary', 'btn-secondary');
+                    checkFormValidity();
+                }
+            );
+        }
+
+        function checkFormValidity() {
+            const hasLocation = !!document.getElementById('report-lat').value;
+            const hasPhoto = !!document.getElementById('report-photo').files[0];
+            const submitBtn = document.getElementById('btn-submit-report');
+            
+            if (hasLocation && hasPhoto) {
+                submitBtn.disabled = false;
+            } else {
+                submitBtn.disabled = true;
+            }
+        }
+        
+        async function handleSubmitReport() {
+            const lat = document.getElementById('report-lat').value;
+            const lng = document.getElementById('report-lng').value;
+            const photo = document.getElementById('report-photo').files[0];
+            const description = document.getElementById('report-description').value;
+            
+            if (!lat || !lng || !photo) {
+                showMessage('error', 'Location and photo are required.');
+                return;
+            }
+
+            showLoading('Submitting report...');
+            
+            const formData = new FormData();
+            formData.append('lat', lat);
+            formData.append('lng', lng);
+            formData.append('photo', photo);
+            formData.append('description', description);
+            formData.append('citizen_device_id', state.config.citizenDeviceId);
+
+            try {
+                const response = await api('/api/report', {
+                    method: 'POST',
+                    body: formData,
+                    // Note: 'Content-Type' is set automatically by browser for FormData
+                });
+
+                if (!response.ok) {
+                    const err = await response.json();
+                    throw new Error(err.error || 'Failed to submit report');
+                }
+                
+                const result = await response.json();
+
+                if (result.upvoted) {
+                    showMessage('success', 'Thank you! Your report has been added as an upvote to a nearby site.');
+                } else {
+                    showMessage('success', 'Report submitted successfully! AI analysis is in progress.');
+                }
+                
+                resetReportForm();
+                navigateTo('my-reports'); // Show user their new report
+
+            } catch (error) {
+                console.error('Report submission error:', error);
+                showMessage('error', `Submission failed: ${error.message}`);
+            } finally {
+                hideLoading();
+            }
+        }
+
+        function resetReportForm() {
+            document.getElementById('report-lat').value = '';
+            document.getElementById('report-lng').value = '';
+            document.getElementById('report-photo').value = '';
+            document.getElementById('report-description').value = '';
+            document.getElementById('photo-preview').classList.add('hidden');
+            document.getElementById('photo-preview').src = '';
+            
+            const locationBtn = document.getElementById('btn-get-location');
+            locationBtn.disabled = false;
+            locationBtn.classList.replace('btn-secondary', 'btn-primary');
+            document.getElementById('location-text').textContent = 'Get My Location';
+            document.getElementById('location-status').classList.add('hidden');
+            
+            document.getElementById('btn-submit-report').disabled = true;
+            state.currentLocation = null;
+        }
+
+        // --- PAGE 2: MY REPORTS ---
+        
+        function initMyReportsPage() {
+            // Nothing to init, just a load function
+        }
+        
+        async function loadMyReports() {
+            const listEl = document.getElementById('my-reports-list');
+            const loadingEl = document.getElementById('my-reports-loading');
+            const noReportsEl = document.getElementById('no-my-reports');
+            
+            loadingEl.classList.remove('hidden');
+            noReportsEl.classList.add('hidden');
+            listEl.innerHTML = ''; // Clear old list, but keep loading/no-reports elements
+            listEl.appendChild(loadingEl);
+            listEl.appendChild(noReportsEl);
+
+            try {
+                const response = await api(`/api/reports/citizen/${state.config.citizenDeviceId}`);
+                if (!response.ok) throw new Error('Failed to fetch reports');
+                
+                const reports = await response.json();
+                
+                loadingEl.classList.add('hidden');
+                
+                if (reports.length === 0) {
+                    noReportsEl.classList.remove('hidden');
+                    return;
+                }
+
+                reports.forEach(report => {
+                    listEl.appendChild(createMyReportCard(report));
+                });
+
+            } catch (error) {
+                console.error('Error loading my reports:', error);
+                loadingEl.classList.add('hidden');
+                showMessage('error', error.message);
+            }
+        }
+        
+        function createMyReportCard(report) {
+            const card = document.createElement('div');
+            card.className = 'card p-4 space-y-3';
+            
+            let statusBadge = '';
+            switch (report.status) {
+                case 'pending':
+                    statusBadge = `<span class="inline-block bg-yellow-600 text-yellow-100 text-xs font-bold px-2 py-1 rounded-full">${report.status}</span>`;
+                    break;
+                case 'in_progress':
+                    statusBadge = `<span class="inline-block bg-blue-600 text-blue-100 text-xs font-bold px-2 py-1 rounded-full">In Progress</span>`;
+                    break;
+                case 'cleaned':
+                    statusBadge = `<span class="inline-block bg-green-600 text-green-100 text-xs font-bold px-2 py-1 rounded-full">${report.status}</span>`;
+                    break;
+            }
+
+            const date = new Date(report.created_at).toLocaleString();
+
+            card.innerHTML = `
+                <div class="flex justify-between items-center">
+                    <div class="font-semibold text-white">Reported: ${date}</div>
+                    ${statusBadge}
+                </div>
+                <p class="text-sm text-gray-300">${report.description || 'No description'}</p>
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <span class="block text-xs font-medium text-gray-400">Before:</span>
+                        <img src="${report.initial_photo_url}" class="rounded-lg w-full h-auto cursor-pointer" onclick="showImageModal('${report.initial_photo_url}')" alt="Initial Report Photo">
+                    </div>
+                    ${report.cleanup_photo_url ? `
+                    <div>
+                        <span class="block text-xs font-medium text-gray-400">After (Cleaned!):</span>
+                        <img src="${report.cleanup_photo_url}" class="rounded-lg w-full h-auto cursor-pointer" onclick="showImageModal('${report.cleanup_photo_url}')" alt="Cleanup Photo">
+                    </div>
+                    ` : `
+                    <div class="flex items-center justify-center text-sm text-gray-500 rounded-lg bg-gray-700 p-4">
+                        Pending cleanup...
+                    </div>
+                    `}
+                </div>
+            `;
+            return card;
+        }
+
+        function showImageModal(src) {
+            // Re-use admin modal for simplicity
+            const modal = document.getElementById('admin-detail-modal');
+            const content = document.getElementById('admin-modal-content');
+            content.innerHTML = `<img src="${src}" class="w-full h-auto rounded-lg">`;
+            modal.classList.remove('hidden');
+            
+            document.getElementById('admin-modal-close').onclick = () => {
+                modal.classList.add('hidden');
+            };
+        }
+
+        // --- PAGE 3: ADMIN ---
+        
+        function initAdminPage() {
+            if (!state.maps.adminMap) {
+                state.maps.adminMap = L.map('admin-map').setView([28.6139, 77.2090], 10);
+                L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+                    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+                }).addTo(state.maps.adminMap);
+            }
+            
+            document.getElementById('admin-refresh').onclick = loadAllReports;
+            document.getElementById('filter-status').onchange = filterAdminView;
+            document.getElementById('filter-severity').onchange = filterAdminView;
+            
+            document.getElementById('admin-modal-close').onclick = () => {
+                document.getElementById('admin-detail-modal').classList.add('hidden');
+            };
+        }
+        
+        async function loadAllReports() {
+            const loadingEl = document.getElementById('admin-loading');
+            loadingEl.classList.remove('hidden');
+            
+            try {
+                const response = await api('/api/reports');
+                if (!response.ok) throw new Error('Failed to fetch reports');
+                
+                state.currentReports = await response.json();
+                filterAdminView(); // This will render the reports
+                
+            } catch (error) {
+                console.error('Error loading all reports:', error);
+                showMessage('error', error.message);
+            } finally {
+                loadingEl.classList.add('hidden');
+            }
+        }
+        
+        function filterAdminView() {
+            const statusFilter = document.getElementById('filter-status').value;
+            const severityFilter = document.getElementById('filter-severity').value;
+            
+            const filteredReports = state.currentReports.filter(report => {
+                const statusMatch = (statusFilter === 'all') || (report.status === statusFilter);
+                const severityMatch = (severityFilter === 'all') || (report.severity === severityFilter);
+                return statusMatch && severityMatch;
+            });
+            
+            renderAdminList(filteredReports);
+            renderAdminMap(filteredReports);
+        }
+
+        function renderAdminList(reports) {
+            const listEl = document.getElementById('admin-list');
+            listEl.innerHTML = ''; // Clear list
+            
+            if (reports.length === 0) {
+                listEl.innerHTML = '<p class="text-center text-gray-500">No reports match filters.</p>';
+                return;
+            }
+
+            reports.forEach(report => {
+                listEl.appendChild(createAdminReportCard(report));
+            });
+        }
+        
+        function getSeverityColor(severity) {
+            switch (severity) {
+                case 'Large': return 'text-red-400';
+                case 'Medium': return 'text-yellow-400';
+                case 'Small': return 'text-green-400';
+                default: return 'text-gray-400';
+            }
+        }
+        
+        function getStatusColor(status) {
+             switch (status) {
+                case 'pending': return 'text-yellow-400';
+                case 'in_progress': return 'text-blue-400';
+                case 'cleaned': return 'text-green-400';
+                default: return 'text-gray-400';
+            }
+        }
+
+        function createAdminReportCard(report) {
+            const card = document.createElement('div');
+            card.className = 'card p-4 flex items-center space-x-4';
+            
+            const severityColor = getSeverityColor(report.severity);
+            const statusColor = getStatusColor(report.status);
+            
+            card.innerHTML = `
+                <div class="flex-shrink-0">
+                    <img src="${report.initial_photo_url}" class="w-16 h-16 rounded-lg object-cover" alt="Report Thumbnail">
+                </div>
+                <div class="flex-grow">
+                    <div class="font-semibold text-white">${report.category || 'N/A'}</div>
+                    <div class="text-sm ${severityColor}"><i class="fa-solid fa-triangle-exclamation"></i> ${report.severity || 'N/A'}</div>
+                    <div class="text-sm ${statusColor}"><i class="fa-solid fa-info-circle"></i> ${report.status.replace('_', ' ')}</div>
+                </div>
+                <div class="text-center">
+                    <div class="text-lg font-bold text-indigo-400">${report.upvotes}</div>
+                    <div class="text-xs text-gray-400">Upvotes</div>
+                </div>
+                <button class="flex-shrink-0 text-gray-400 hover:text-white" data-id="${report.id}">
+                    <i class="fa-solid fa-chevron-right"></i>
+                </button>
+            `;
+            
+            card.querySelector('button').onclick = () => showAdminDetailModal(report);
+            return card;
+        }
+        
+        function renderAdminMap(reports) {
+            // Clear existing layers
+            state.maps.adminMap.eachLayer(layer => {
+                if (layer instanceof L.Marker) {
+                    state.maps.adminMap.removeLayer(layer);
+                }
+            });
+
+            if (reports.length === 0) return;
+            
+            const markers = [];
+            reports.forEach(report => {
+                const marker = L.marker([report.lat, report.lng])
+                    .addTo(state.maps.adminMap)
+                    .on('click', () => showAdminDetailModal(report));
+                markers.push(marker);
+            });
+            
+            // Re-focus map
+            const group = new L.featureGroup(markers);
+            state.maps.adminMap.fitBounds(group.getBounds().pad(0.1), { maxZoom: 15 });
+        }
+
+        function showAdminDetailModal(report) {
+            const modal = document.getElementById('admin-detail-modal');
+            const content = document.getElementById('admin-modal-content');
+            
+            const statusOptions = ['pending', 'in_progress', 'cleaned']
+                .map(s => `<option value="${s}" ${report.status === s ? 'selected' : ''}>${s.replace('_', ' ')}</option>`)
+                .join('');
+
+            content.innerHTML = `
+                <img src="${report.initial_photo_url}" class="w-full h-auto rounded-lg mb-4" alt="Report Photo">
+                
+                <h3 class="text-lg font-semibold text-white">${report.category} (${report.severity})</h3>
+                <p class="text-sm text-gray-300 mb-2">${report.description || 'No description'}</p>
+                <p class="text-xs text-gray-400">Reported: ${new Date(report.created_at).toLocaleString()}</p>
+                <p class="text-xs text-gray-400">Upvotes: ${report.upvotes}</p>
+                
+                <hr class="border-gray-700 my-4">
+                
+                ${report.status === 'cleaned' ? `
+                    <div class="text-center text-green-400 font-bold p-3 bg-gray-700 rounded-lg">
+                        <i class="fa-solid fa-check-circle"></i> This report is Cleaned.
+                    </div>
+                    ${report.cleanup_photo_url ? `<img src="${report.cleanup_photo_url}" class="w-full h-auto rounded-lg mt-4" alt="Cleanup Photo">` : ''}
+                ` : `
+                    <h4 class="font-semibold text-white mb-2">Update Status</h4>
+                    <div class="space-y-4" id="admin-update-form">
+                        <input type="hidden" id="admin-report-id" value="${report.id}">
+                        
+                        <!-- Option 1: Quick Status Update -->
+                        <div class="flex space-x-2">
+                            <select id="admin-new-status" class="input-field flex-grow">
+                                ${statusOptions}
+                            </select>
+                            <button id="btn-update-status" class="bg-indigo-600 text-white font-bold py-2 px-4 rounded-lg hover:bg-indigo-700">Update</button>
+                        </div>
+                        
+                        <div class="relative flex items-center">
+                            <div class="flex-grow border-t border-gray-600"></div>
+                            <span class="flex-shrink mx-4 text-gray-400 text-sm">OR</span>
+                            <div class="flex-grow border-t border-gray-600"></div>
+                        </div>
+
+                        <!-- Option 2: Mark as Cleaned (with photo) -->
+                        <div>
+                            <label for="admin-cleanup-photo" class="block text-sm font-medium text-gray-300 mb-2">Upload Proof of Cleanup</label>
+                            <input type="file" id="admin-cleanup-photo" accept="image/*" class="w-full text-sm text-gray-400
+                                file:mr-4 file:py-2 file:px-4
+                                file:rounded-lg file:border-0
+                                file:text-sm file:font-semibold
+                                file:bg-green-600 file:text-white
+                                hover:file:bg-green-700 cursor-pointer"/>
+                        </div>
+                        <button id="btn-mark-cleaned" class="btn-primary w-full bg-green-600 hover:bg-green-700">
+                            <i class="fa-solid fa-check"></i> Mark as Cleaned
+                        </button>
+                    </div>
+                `}
+            `;
+            
+            // Add event listeners only if the form exists
+            if (report.status !== 'cleaned') {
+                document.getElementById('btn-update-status').onclick = handleStatusUpdate;
+                document.getElementById('btn-mark-cleaned').onclick = handleMarkCleaned;
+            }
+            
+            modal.classList.remove('hidden');
+        }
+        
+        async function handleStatusUpdate() {
+            const reportId = document.getElementById('admin-report-id').value;
+            const status = document.getElementById('admin-new-status').value;
+            
+            if (status === 'cleaned') {
+                showMessage('info', 'Please use the "Mark as Cleaned" button to upload a photo.');
+                return;
+            }
+            
+            showLoading('Updating status...');
+            try {
+                const response = await api(`/api/report/${reportId}/status`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ status })
+                });
+                
+                if (!response.ok) throw new Error('Failed to update status');
+                
+                showMessage('success', 'Status updated!');
+                document.getElementById('admin-detail-modal').classList.add('hidden');
+                loadAllReports(); // Refresh list
+                
+            } catch (error) {
+                showMessage('error', error.message);
+            } finally {
+                hideLoading();
+            }
+        }
+        
+        async function handleMarkCleaned() {
+            const reportId = document.getElementById('admin-report-id').value;
+            const photo = document.getElementById('admin-cleanup-photo').files[0];
+            
+            if (!photo) {
+                showMessage('error', 'Cleanup photo is required to mark as cleaned.');
+                return;
+            }
+            
+            showLoading('Uploading cleanup proof...');
+            
+            const formData = new FormData();
+            formData.append('photo', photo);
+            
+            try {
+                const response = await api(`/api/report/${reportId}/cleanup`, {
+                    method: 'PUT',
+                    body: formData,
+                });
+                
+                if (!response.ok) throw new Error('Failed to mark as cleaned');
+                
+                showMessage('success', 'Report marked as cleaned!');
+                document.getElementById('admin-detail-modal').classList.add('hidden');
+                loadAllReports(); // Refresh list
+                
+            } catch (error) {
+                showMessage('error', error.message);
+            } finally {
+                hideLoading();
+            }
+        }
+
+        // --- PAGE 4: STATS ---
+
+        function initStatsPage() {
+            document.getElementById('stats-refresh').onclick = loadStats;
+            
+            if (!state.maps.heatmap) {
+                state.maps.heatmap = L.map('heatmap-map').setView([28.6139, 77.2090], 10);
+                L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+                    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+                }).addTo(state.maps.heatmap);
+            }
+        }
+        
+        async function loadStats() {
+            const loadingEl = document.getElementById('stats-loading');
+            const contentEl = document.getElementById('stats-content');
+            
+            loadingEl.classList.remove('hidden');
+            contentEl.classList.add('hidden');
+            
+            try {
+                const response = await api('/api/stats');
+                if (!response.ok) throw new Error('Failed to load stats');
+                
+                const stats = await response.json();
+                renderStats(stats);
+                
+                contentEl.classList.remove('hidden');
+                
+            } catch (error) {
+                console.error('Error loading stats:', error);
+                showMessage('error', error.message);
+            } finally {
+                loadingEl.classList.add('hidden');
+            }
+        }
+        
+        function renderStats(stats) {
+            // 1. KPIs
+            document.getElementById('kpi-total').textContent = stats.kpis.total;
+            document.getElementById('kpi-cleaned').textContent = stats.kpis.cleaned;
+            document.getElementById('kpi-avg-time').textContent = stats.kpis.avg_cleanup_time_hours || 'N/A';
+            
+            // 2. Reports Over Time
+            const ctxTime = document.getElementById('reports-over-time-chart').getContext('2d');
+            if (state.charts.reportsOverTime) state.charts.reportsOverTime.destroy();
+            
+            const timeLabels = stats.overTime.map(d => new Date(d.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
+            const timeData = stats.overTime.map(d => d.count);
+            
+            state.charts.reportsOverTime = new Chart(ctxTime, {
+                type: 'line',
+                data: {
+                    labels: timeLabels,
+                    datasets: [{
+                        label: 'Reports per Day',
+                        data: timeData,
+                        borderColor: '#818cf8',
+                        backgroundColor: 'rgba(129, 140, 248, 0.2)',
+                        fill: true,
+                        tension: 0.1
+                    }]
+                },
+                options: {
+                    scales: {
+                        y: { grid: { color: '#374151' }, ticks: { color: '#d1d5db' } },
+                        x: { grid: { color: '#374151' }, ticks: { color: '#d1d5db' } }
+                    },
+                    plugins: { legend: { labels: { color: '#d1d5db' } } }
+                }
+            });
+            
+            // 3. Category Chart
+            const ctxCat = document.getElementById('category-chart').getContext('2d');
+            if (state.charts.category) state.charts.category.destroy();
+            
+            const catLabels = stats.byCategory.map(c => c.category);
+            const catData = stats.byCategory.map(c => c.count);
+            
+            state.charts.category = new Chart(ctxCat, {
+                type: 'doughnut',
+                data: {
+                    labels: catLabels,
+                    datasets: [{
+                        label: 'Reports by Category',
+                        data: catData,
+                        backgroundColor: ['#ef4444', '#f97316', '#eab308', '#22c55e', '#3b82f6', '#8b5cf6'],
+                    }]
+                },
+                options: {
+                    plugins: { legend: { position: 'right', labels: { color: '#d1d5db' } } }
+                }
+            });
+            
+            // 4. Heatmap
+            const heatData = stats.locations.map(loc => [loc.lat, loc.lng, 0.5]); // lat, lng, intensity
+            if (state.maps.heatmapLayer) state.maps.heatmap.removeLayer(state.maps.heatmapLayer);
+            
+            state.maps.heatmapLayer = L.heatLayer(heatData, {
+                radius: 25,
+                blur: 15,
+                maxZoom: 17,
+                gradient: { 0.4: 'blue', 0.65: 'lime', 1: 'red' }
+            }).addTo(state.maps.heatmap);
+            
+            // Invalidate map size since it was hidden
+            setTimeout(() => state.maps.heatmap.invalidateSize(), 100);
+        }
+
+    </script>
+</body>
+</html>
+
