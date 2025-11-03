@@ -1,7 +1,7 @@
 // CleanSweep Backend (server.js)
 // --- Dependencies ---
 const express = require('express');
-const mysql = require('mysql2/promise');
+const { Pool } = require('pg'); // Use pg for PostgreSQL
 const cors = require('cors');
 const multer = require('multer');
 const { v2: cloudinary } = require('cloudinary');
@@ -45,24 +45,22 @@ const uploadToCloudinary = (buffer) => {
     });
 };
 
-// --- MySQL Database Connection ---
+// --- PostgreSQL Database Connection ---
 let dbPool;
 async function initDatabase() {
     try {
-        dbPool = mysql.createPool({
-            host: process.env.DB_HOST,
-            user: process.env.DB_USER,
-            password: process.env.DB_PASSWORD,
-            database: process.env.DB_NAME,
-            waitForConnections: true,
-            connectionLimit: 10,
-            queueLimit: 0,
+        // Render provides a DATABASE_URL environment variable, which the Pool uses automatically.
+        dbPool = new Pool({
+            connectionString: process.env.DATABASE_URL,
+            ssl: {
+                rejectUnauthorized: false // Required for Render connections
+            }
         });
         // Test connection
-        const [rows] = await dbPool.query('SELECT 1');
-        console.log('Database connected successfully.');
+        await dbPool.query('SELECT 1');
+        console.log('PostgreSQL Database connected successfully.');
     } catch (error) {
-        console.error('Failed to connect to database:', error);
+        console.error('Failed to connect to PostgreSQL database:', error);
         process.exit(1); // Exit if DB connection fails
     }
 }
@@ -161,12 +159,13 @@ app.post('/api/report', upload.single('photo'), async (req, res) => {
 
         // --- 1. Clustering Logic ---
         // Haversine formula in SQL to find nearby pending reports (within 50 meters)
-        const [existing] = await dbPool.query(
+        // Placeholders changed from ? to $1, $2, etc. for PostgreSQL
+        const { rows: existing } = await dbPool.query(
             `SELECT id, (
                 6371 * acos(
-                    cos(radians(?)) * cos(radians(lat)) *
-                    cos(radians(lng) - radians(?)) +
-                    sin(radians(?)) * sin(radians(lat))
+                    cos(radians($1)) * cos(radians(lat)) *
+                    cos(radians(lng) - radians($2)) +
+                    sin(radians($3)) * sin(radians(lat))
                 )
             ) AS distance
             FROM reports
@@ -181,10 +180,10 @@ app.post('/api/report', upload.single('photo'), async (req, res) => {
             // Found a duplicate! Upvote it.
             const reportId = existing[0].id;
             await dbPool.query(
-                'UPDATE reports SET upvotes = upvotes + 1 WHERE id = ?',
+                'UPDATE reports SET upvotes = upvotes + 1 WHERE id = $1',
                 [reportId]
             );
-            const [updatedReport] = await dbPool.query('SELECT * FROM reports WHERE id = ?', [reportId]);
+            const { rows: updatedReport } = await dbPool.query('SELECT * FROM reports WHERE id = $1', [reportId]);
             return res.status(200).json({ ...updatedReport[0], upvoted: true });
         }
 
@@ -197,16 +196,17 @@ app.post('/api/report', upload.single('photo'), async (req, res) => {
         const { category, severity } = await getAITriage(photoBuffer, mimeType, geminiKey);
         
         // Save to database
-        const [result] = await dbPool.query(
+        // Added "RETURNING *" to get the new row back (PostgreSQL specific)
+        const { rows } = await dbPool.query(
             `INSERT INTO reports (citizen_device_id, lat, lng, initial_photo_url, description, category, severity)
-             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             RETURNING *`,
             [citizen_device_id, lat, lng, initial_photo_url, description, category, severity]
         );
         
-        const newReportId = result.insertId;
-        const [newReport] = await dbPool.query('SELECT * FROM reports WHERE id = ?', [newReportId]);
+        const newReport = rows[0];
         
-        res.status(201).json(newReport[0]);
+        res.status(201).json(newReport);
 
     } catch (error) {
         console.error('POST /api/report Error:', error);
@@ -220,7 +220,7 @@ app.post('/api/report', upload.single('photo'), async (req, res) => {
  */
 app.get('/api/reports', async (req, res) => {
     try {
-        const [reports] = await dbPool.query('SELECT * FROM reports ORDER BY created_at DESC');
+        const { rows: reports } = await dbPool.query('SELECT * FROM reports ORDER BY created_at DESC');
         res.json(reports);
     } catch (error) {
         console.error('GET /api/reports Error:', error);
@@ -235,8 +235,8 @@ app.get('/api/reports', async (req, res) => {
 app.get('/api/reports/citizen/:deviceId', async (req, res) => {
     try {
         const { deviceId } = req.params;
-        const [reports] = await dbPool.query(
-            'SELECT * FROM reports WHERE citizen_device_id = ? ORDER BY created_at DESC',
+        const { rows: reports } = await dbPool.query(
+            'SELECT * FROM reports WHERE citizen_device_id = $1 ORDER BY created_at DESC',
             [deviceId]
         );
         res.json(reports);
@@ -259,7 +259,7 @@ app.put('/api/report/:id/status', async (req, res) => {
             return res.status(400).json({ error: 'Invalid status.' });
         }
         
-        await dbPool.query('UPDATE reports SET status = ? WHERE id = ?', [status, id]);
+        await dbPool.query('UPDATE reports SET status = $1 WHERE id = $2', [status, id]);
         res.json({ success: true, message: 'Status updated.' });
 
     } catch (error) {
@@ -286,7 +286,7 @@ app.put('/api/report/:id/cleanup', upload.single('photo'), async (req, res) => {
 
         // Update database
         await dbPool.query(
-            'UPDATE reports SET status = ?, cleanup_photo_url = ?, cleaned_at = NOW() WHERE id = ?',
+            'UPDATE reports SET status = $1, cleanup_photo_url = $2, cleaned_at = NOW() WHERE id = $3',
             ['cleaned', cleanup_photo_url, id]
         );
         
@@ -305,33 +305,35 @@ app.put('/api/report/:id/cleanup', upload.single('photo'), async (req, res) => {
 app.get('/api/stats', async (req, res) => {
     try {
         // 1. KPIs
-        const [kpiRows] = await dbPool.query(
+        // Changed TIMESTAMPDIFF to PostgreSQL's EXTRACT(EPOCH FROM ...) / 3600
+        const { rows: kpiRows } = await dbPool.query(
             `SELECT
                 COUNT(*) as total,
                 SUM(CASE WHEN status = 'cleaned' THEN 1 ELSE 0 END) as cleaned,
-                AVG(CASE WHEN status = 'cleaned' THEN TIMESTAMPDIFF(HOUR, created_at, cleaned_at) ELSE NULL END) as avg_cleanup_time_hours
+                AVG(CASE WHEN status = 'cleaned' THEN EXTRACT(EPOCH FROM (cleaned_at - created_at)) / 3600 ELSE NULL END) as avg_cleanup_time_hours
             FROM reports`
         );
         const kpis = kpiRows[0];
         
         // 2. Reports over Time (last 30 days)
-        const [overTimeRows] = await dbPool.query(
+        // Changed CURDATE() and INTERVAL syntax for PostgreSQL
+        const { rows: overTimeRows } = await dbPool.query(
             `SELECT DATE(created_at) as date, COUNT(*) as count
              FROM reports
-             WHERE created_at >= CURDATE() - INTERVAL 30 DAY
+             WHERE created_at >= CURRENT_DATE - INTERVAL '30 days'
              GROUP BY DATE(created_at)
              ORDER BY date ASC`
         );
         
         // 3. Reports by Category
-        const [byCategoryRows] = await dbPool.query(
+        const { rows: byCategoryRows } = await dbPool.query(
             `SELECT category, COUNT(*) as count
              FROM reports
              GROUP BY category`
         );
         
         // 4. Location Hotspots
-        const [locationRows] = await dbPool.query(
+        const { rows: locationRows } = await dbPool.query(
             `SELECT lat, lng FROM reports`
         );
 
