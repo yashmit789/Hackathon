@@ -1,4 +1,5 @@
 // CleanSweep Backend (server.js)
+// This is the stable version with the 'report_STAYUS' typo fixed.
 // --- Dependencies ---
 const express = require('express');
 const { Pool } = require('pg'); // Use 'pg' for PostgreSQL
@@ -72,36 +73,28 @@ async function initDatabase() {
  * @param {Buffer} imageBuffer - The image buffer
  * @param {string} mimeType - The image mime type (e.g., 'image/jpeg')
  * @param {string} geminiKey - The API key from the user
- * @returns {Promise<object>} - { isGarbage, category, severity }
+ * @returns {Promise<object>} - { category, severity }
  */
 async function getAITriage(imageBuffer, mimeType, geminiKey) {
     if (!geminiKey) {
         console.warn('No Gemini key provided. Skipping AI triage.');
-        // Fail-safe: assume it's garbage if AI is down
-        return { isGarbage: true, category: 'Other', severity: 'Medium' };
+        return { category: 'Other', severity: 'Medium' };
     }
 
     const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${geminiKey}`;
     
     const imageBase64 = imageBuffer.toString('base64');
     
-    // *** UPDATED PROMPT ***
-    // This prompt now forces the model to check for garbage first.
+    // This is the ORIGINAL, simpler prompt
     const prompt = `
-        Analyze this image.
-        Respond ONLY with a valid JSON object with three keys: "isGarbage", "category", and "severity".
-
-        1. "isGarbage": A boolean (true/false). Set to true ONLY if the image clearly contains a significant amount of garbage, litter, or a dump site. Set to false if it's a clean area, a person, an indoor room, or any other image not depicting waste.
-        2. "category": (Only if isGarbage is true) "Household Waste", "Construction Debris", "Hazardous/Chemical", "E-Waste", "Organic/Green Waste", "Other".
-        3. "severity": (Only if isGarbage is true) "Small", "Medium", "Large".
-
-        If "isGarbage" is false, set "category" and "severity" to "N/A".
+        Analyze this image of a dump site.
+        Respond ONLY with a valid JSON object with two keys: "category" and "severity".
         
-        Example response (with garbage):
-        {"isGarbage": true, "category": "Construction Debris", "severity": "Large"}
-
-        Example response (no garbage):
-        {"isGarbage": false, "category": "N/A", "severity": "N/A"}
+        "category" options: "Household Waste", "Construction Debris", "Hazardous/Chemical", "E-Waste", "Organic/Green Waste", "Other".
+        "severity" options: "Small" (e.g., a few bags), "Medium" (e.g., a small pile, mattress), "Large" (e.g., truckload, construction site).
+        
+        Example response:
+        {"category": "Construction Debris", "severity": "Large"}
     `;
 
     const payload = {
@@ -136,17 +129,15 @@ async function getAITriage(imageBuffer, mimeType, geminiKey) {
         const jsonText = text.replace(/```json/g, '').replace(/```/g, '').trim();
         const aiResponse = JSON.parse(jsonText);
         
-        // Return the full analysis object
         return {
-            isGarbage: aiResponse.isGarbage === true, // Ensure it's a boolean
-            category: aiResponse.category || 'N/A',
-            severity: aiResponse.severity || 'N/A'
+            category: aiResponse.category || 'Other',
+            severity: aiResponse.severity || 'Medium'
         };
 
     } catch (error) {
         console.error('AI Triage Failed:', error.message);
-        // Fallback on error: Assume it's garbage to allow submission
-        return { isGarbage: true, category: 'Other', severity: 'Medium' };
+        // Fallback on error
+        return { category: 'Other', severity: 'Medium' };
     }
 }
 
@@ -174,17 +165,7 @@ app.post('/api/report', upload.single('photo'), async (req, res) => {
             return res.status(400).json({ error: 'Missing required fields.' });
         }
 
-        // --- 1. AI VALIDATION STEP (NEW) ---
-        // Get AI Triage first to validate the image
-        const { isGarbage, category, severity } = await getAITriage(photoBuffer, mimeType, geminiKey);
-        
-        if (!isGarbage) {
-            console.warn('Image validation failed: No garbage detected.');
-            // Send a 400 Bad Request error back to the frontend
-            return res.status(400).json({ error: 'Image rejected: No garbage or litter was detected in the photo.' });
-        }
-
-        // --- 2. Clustering Logic (FIXED FOR POSTGRESQL) ---
+        // --- 1. Clustering Logic (FIXED FOR POSTGRESQL) ---
         // We must use a subquery for PostgreSQL to recognize the 'distance' alias
         const { rows: existing } = await dbPool.query(
             `SELECT * FROM (
@@ -215,12 +196,15 @@ app.post('/api/report', upload.single('photo'), async (req, res) => {
             return res.status(200).json({ ...updatedReport[0], upvoted: true });
         }
 
-        // --- 3. Not a duplicate, create new report ---
+        // --- 2. Not a duplicate, create new report ---
         
         // Upload photo to Cloudinary
         const initial_photo_url = await uploadToCloudinary(photoBuffer);
         
-        // Save to database (we already have category and severity from step 1)
+        // Get AI Triage
+        const { category, severity } = await getAITriage(photoBuffer, mimeType, geminiKey);
+        
+        // Save to database
         const { rows: newReport } = await dbPool.query(
             `INSERT INTO reports (citizen_device_id, lat, lng, initial_photo_url, description, category, severity)
              VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -310,8 +294,9 @@ app.put('/api/report/:id/cleanup', upload.single('photo'), async (req, res) => {
         const cleanup_photo_url = await uploadToCloudinary(photoBuffer);
 
         // Update database
+        // *** THIS IS THE FIXED LINE ***
         await dbPool.query(
-            'UPDATE reports SET status = $1::report_STAYUS, cleanup_photo_url = $2, cleaned_at = NOW() WHERE id = $3',
+            'UPDATE reports SET status = $1::report_status, cleanup_photo_url = $2, cleaned_at = NOW() WHERE id = $3',
             ['cleaned', cleanup_photo_url, id]
         );
         
