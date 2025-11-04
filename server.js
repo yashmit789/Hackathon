@@ -72,27 +72,36 @@ async function initDatabase() {
  * @param {Buffer} imageBuffer - The image buffer
  * @param {string} mimeType - The image mime type (e.g., 'image/jpeg')
  * @param {string} geminiKey - The API key from the user
- * @returns {Promise<object>} - { category, severity }
+ * @returns {Promise<object>} - { isGarbage, category, severity }
  */
 async function getAITriage(imageBuffer, mimeType, geminiKey) {
     if (!geminiKey) {
         console.warn('No Gemini key provided. Skipping AI triage.');
-        return { category: 'Other', severity: 'Medium' };
+        // Fail-safe: assume it's garbage if AI is down
+        return { isGarbage: true, category: 'Other', severity: 'Medium' };
     }
 
     const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${geminiKey}`;
     
     const imageBase64 = imageBuffer.toString('base64');
     
+    // *** UPDATED PROMPT ***
+    // This prompt now forces the model to check for garbage first.
     const prompt = `
-        Analyze this image of a dump site.
-        Respond ONLY with a valid JSON object with two keys: "category" and "severity".
+        Analyze this image.
+        Respond ONLY with a valid JSON object with three keys: "isGarbage", "category", and "severity".
+
+        1. "isGarbage": A boolean (true/false). Set to true ONLY if the image clearly contains a significant amount of garbage, litter, or a dump site. Set to false if it's a clean area, a person, an indoor room, or any other image not depicting waste.
+        2. "category": (Only if isGarbage is true) "Household Waste", "Construction Debris", "Hazardous/Chemical", "E-Waste", "Organic/Green Waste", "Other".
+        3. "severity": (Only if isGarbage is true) "Small", "Medium", "Large".
+
+        If "isGarbage" is false, set "category" and "severity" to "N/A".
         
-        "category" options: "Household Waste", "Construction Debris", "Hazardous/Chemical", "E-Waste", "Organic/Green Waste", "Other".
-        "severity" options: "Small" (e.g., a few bags), "Medium" (e.g., a small pile, mattress), "Large" (e.g., truckload, construction site).
-        
-        Example response:
-        {"category": "Construction Debris", "severity": "Large"}
+        Example response (with garbage):
+        {"isGarbage": true, "category": "Construction Debris", "severity": "Large"}
+
+        Example response (no garbage):
+        {"isGarbage": false, "category": "N/A", "severity": "N/A"}
     `;
 
     const payload = {
@@ -127,15 +136,17 @@ async function getAITriage(imageBuffer, mimeType, geminiKey) {
         const jsonText = text.replace(/```json/g, '').replace(/```/g, '').trim();
         const aiResponse = JSON.parse(jsonText);
         
+        // Return the full analysis object
         return {
-            category: aiResponse.category || 'Other',
-            severity: aiResponse.severity || 'Medium'
+            isGarbage: aiResponse.isGarbage === true, // Ensure it's a boolean
+            category: aiResponse.category || 'N/A',
+            severity: aiResponse.severity || 'N/A'
         };
 
     } catch (error) {
         console.error('AI Triage Failed:', error.message);
-        // Fallback on error
-        return { category: 'Other', severity: 'Medium' };
+        // Fallback on error: Assume it's garbage to allow submission
+        return { isGarbage: true, category: 'Other', severity: 'Medium' };
     }
 }
 
@@ -149,6 +160,12 @@ async function getAITriage(imageBuffer, mimeType, geminiKey) {
 app.post('/api/report', upload.single('photo'), async (req, res) => {
     try {
         const { lat, lng, description, citizen_device_id } = req.body;
+        
+        // Check for file
+        if (!req.file) {
+            return res.status(400).json({ error: 'Photo is required.' });
+        }
+        
         const photoBuffer = req.file.buffer;
         const mimeType = req.file.mimetype;
         const geminiKey = req.headers['x-gemini-key'];
@@ -157,7 +174,17 @@ app.post('/api/report', upload.single('photo'), async (req, res) => {
             return res.status(400).json({ error: 'Missing required fields.' });
         }
 
-        // --- 1. Clustering Logic (FIXED FOR POSTGRESQL) ---
+        // --- 1. AI VALIDATION STEP (NEW) ---
+        // Get AI Triage first to validate the image
+        const { isGarbage, category, severity } = await getAITriage(photoBuffer, mimeType, geminiKey);
+        
+        if (!isGarbage) {
+            console.warn('Image validation failed: No garbage detected.');
+            // Send a 400 Bad Request error back to the frontend
+            return res.status(400).json({ error: 'Image rejected: No garbage or litter was detected in the photo.' });
+        }
+
+        // --- 2. Clustering Logic (FIXED FOR POSTGRESQL) ---
         // We must use a subquery for PostgreSQL to recognize the 'distance' alias
         const { rows: existing } = await dbPool.query(
             `SELECT * FROM (
@@ -188,15 +215,12 @@ app.post('/api/report', upload.single('photo'), async (req, res) => {
             return res.status(200).json({ ...updatedReport[0], upvoted: true });
         }
 
-        // --- 2. Not a duplicate, create new report ---
+        // --- 3. Not a duplicate, create new report ---
         
         // Upload photo to Cloudinary
         const initial_photo_url = await uploadToCloudinary(photoBuffer);
         
-        // Get AI Triage
-        const { category, severity } = await getAITriage(photoBuffer, mimeType, geminiKey);
-        
-        // Save to database
+        // Save to database (we already have category and severity from step 1)
         const { rows: newReport } = await dbPool.query(
             `INSERT INTO reports (citizen_device_id, lat, lng, initial_photo_url, description, category, severity)
              VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -274,18 +298,20 @@ app.put('/api/report/:id/status', async (req, res) => {
 app.put('/api/report/:id/cleanup', upload.single('photo'), async (req, res) => {
     try {
         const { id } = req.params;
-        const photoBuffer = req.file.buffer;
-
-        if (!photoBuffer) {
+        
+        // Check for file
+        if (!req.file) {
             return res.status(400).json({ error: 'Cleanup photo is required.' });
         }
+
+        const photoBuffer = req.file.buffer;
 
         // Upload cleanup photo
         const cleanup_photo_url = await uploadToCloudinary(photoBuffer);
 
         // Update database
         await dbPool.query(
-            'UPDATE reports SET status = $1::report_status, cleanup_photo_url = $2, cleaned_at = NOW() WHERE id = $3',
+            'UPDATE reports SET status = $1::report_STAYUS, cleanup_photo_url = $2, cleaned_at = NOW() WHERE id = $3',
             ['cleaned', cleanup_photo_url, id]
         );
         
@@ -296,6 +322,33 @@ app.put('/api/report/:id/cleanup', upload.single('photo'), async (req, res) => {
         res.status(500).json({ error: 'Server error while processing cleanup.' });
     }
 });
+
+/**
+ * Endpoint: DELETE /api/report/:id
+ * Deletes a report from the database.
+ */
+app.delete('/api/report/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        if (!id) {
+            return res.status(400).json({ error: 'Report ID is required.' });
+        }
+
+        const { rowCount } = await dbPool.query('DELETE FROM reports WHERE id = $1', [id]);
+
+        if (rowCount === 0) {
+            return res.status(404).json({ error: 'Report not found.' });
+        }
+
+        res.json({ success: true, message: 'Report deleted successfully.' });
+
+    } catch (error) {
+        console.error('DELETE /api/report Error:', error);
+        res.status(500).json({ error: 'Server error while deleting report.' });
+    }
+});
+
 
 /**
  * Endpoint: GET /api/stats
@@ -358,3 +411,4 @@ app.listen(port, async () => {
     await initDatabase();
     console.log(`CleanSweep server listening on port ${port}`);
 });
+
